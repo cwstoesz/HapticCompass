@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bluetooth Compass Transmitter</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: white;
+        }
+        
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(31, 38, 135, 0.37);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .compass-display {
+            text-align: center;
+            margin: 30px 0;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+        }
+        
+        .compass-heading {
+            font-size: 3em;
+            font-weight: bold;
+            margin: 10px 0;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        
+        .compass-arrow {
+            font-size: 4em;
+            transition: transform 0.3s ease;
+            display: inline-block;
+        }
+        
+        button {
+            background: linear-gradient(145deg, #ff6b6b, #ee5a24);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            border-radius: 25px;
+            cursor: pointer;
+            margin: 10px 5px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(238, 90, 36, 0.4);
+            width: 100%;
+            max-width: 200px;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(238, 90, 36, 0.6);
+        }
+        
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .status.connected {
+            background: rgba(72, 187, 120, 0.3);
+            border: 1px solid rgba(72, 187, 120, 0.5);
+        }
+        
+        .status.error {
+            background: rgba(245, 101, 101, 0.3);
+            border: 1px solid rgba(245, 101, 101, 0.5);
+        }
+        
+        .button-group {
+            text-align: center;
+            margin: 20px 0;
+        }
+        
+        .info {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧭 Bluetooth Compass</h1>
+        
+        <div class="compass-display">
+            <div class="compass-arrow" id="compassArrow">🧭</div>
+            <div class="compass-heading" id="compassHeading">---°</div>
+            <div>Magnetic Heading</div>
+        </div>
+        
+        <div class="status" id="status">Ready to connect</div>
+        
+        <div class="button-group">
+            <button id="connectBtn">Connect to nRF52</button>
+            <button id="startCompass" disabled>Start Compass</button>
+            <button id="stopCompass" disabled>Stop Compass</button>
+        </div>
+        
+        <div class="info">
+            <strong>Instructions:</strong><br>
+            1. Click "Connect to nRF52" to pair with your Adafruit device<br>
+            2. Allow location/motion permissions when prompted<br>
+            3. Click "Start Compass" to begin transmitting heading data<br>
+            <br>
+            <strong>Note:</strong> This requires HTTPS and iOS 13+ for device orientation permissions.
+        </div>
+    </div>
+
+    <script>
+        class BluetoothCompass {
+            constructor() {
+                this.device = null;
+                this.server = null;
+                this.service = null;
+                this.characteristic = null;
+                this.isTransmitting = false;
+                this.currentHeading = 0;
+                
+                // Standard Nordic UART Service UUIDs
+                this.serviceUuid = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+                this.txCharacteristicUuid = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+                
+                this.initEventListeners();
+            }
+            
+            initEventListeners() {
+                document.getElementById('connectBtn').addEventListener('click', () => this.connect());
+                document.getElementById('startCompass').addEventListener('click', () => this.startCompass());
+                document.getElementById('stopCompass').addEventListener('click', () => this.stopCompass());
+                
+                // Handle device orientation
+                if (window.DeviceOrientationEvent) {
+                    window.addEventListener('deviceorientation', (e) => this.handleOrientation(e));
+                }
+            }
+            
+            async connect() {
+                try {
+                    this.updateStatus('Scanning for devices...');
+                    
+                    // Request device with Nordic UART service
+                    this.device = await navigator.bluetooth.requestDevice({
+                        filters: [
+                            { services: [this.serviceUuid] },
+                            { namePrefix: 'Adafruit' },
+                            { namePrefix: 'nRF52' }
+                        ],
+                        optionalServices: [this.serviceUuid]
+                    });
+                    
+                    this.updateStatus('Connecting to ' + this.device.name + '...');
+                    
+                    // Connect to GATT server
+                    this.server = await this.device.gatt.connect();
+                    
+                    // Get service
+                    this.service = await this.server.getPrimaryService(this.serviceUuid);
+                    
+                    // Get TX characteristic (for sending data to device)
+                    this.characteristic = await this.service.getCharacteristic(this.txCharacteristicUuid);
+                    
+                    this.updateStatus('Connected to ' + this.device.name, 'connected');
+                    
+                    document.getElementById('connectBtn').disabled = true;
+                    document.getElementById('startCompass').disabled = false;
+                    
+                    // Handle disconnection
+                    this.device.addEventListener('gattserverdisconnected', () => this.onDisconnected());
+                    
+                } catch (error) {
+                    this.updateStatus('Connection failed: ' + error.message, 'error');
+                    console.error('Connection error:', error);
+                }
+            }
+            
+            onDisconnected() {
+                this.updateStatus('Device disconnected', 'error');
+                this.stopCompass();
+                document.getElementById('connectBtn').disabled = false;
+                document.getElementById('startCompass').disabled = true;
+                document.getElementById('stopCompass').disabled = true;
+                this.device = null;
+                this.server = null;
+                this.service = null;
+                this.characteristic = null;
+            }
+            
+            async startCompass() {
+                try {
+                    // Request permission for device orientation on iOS 13+
+                    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                        const permission = await DeviceOrientationEvent.requestPermission();
+                        if (permission !== 'granted') {
+                            this.updateStatus('Device orientation permission denied', 'error');
+                            return;
+                        }
+                    }
+                    
+                    this.isTransmitting = true;
+                    document.getElementById('startCompass').disabled = true;
+                    document.getElementById('stopCompass').disabled = false;
+                    this.updateStatus('Transmitting compass data...', 'connected');
+                    
+                    // Start transmission loop
+                    this.transmissionLoop();
+                    
+                } catch (error) {
+                    this.updateStatus('Failed to start compass: ' + error.message, 'error');
+                    console.error('Compass error:', error);
+                }
+            }
+            
+            stopCompass() {
+                this.isTransmitting = false;
+                document.getElementById('startCompass').disabled = false;
+                document.getElementById('stopCompass').disabled = true;
+                this.updateStatus('Compass transmission stopped');
+            }
+            
+            handleOrientation(event) {
+                if (event.webkitCompassHeading) {
+                    // iOS - webkitCompassHeading gives magnetic north
+                    this.currentHeading = 360 - event.webkitCompassHeading;
+                } else if (event.alpha) {
+                    // Android - alpha gives rotation around z-axis
+                    this.currentHeading = (360 - event.alpha) % 360;
+                }
+                
+                this.updateCompassDisplay();
+            }
+            
+            updateCompassDisplay() {
+                const headingElement = document.getElementById('compassHeading');
+                const arrowElement = document.getElementById('compassArrow');
+                
+                headingElement.textContent = Math.round(this.currentHeading) + '°';
+                arrowElement.style.transform = `rotate(${this.currentHeading}deg)`;
+            }
+            
+            async transmissionLoop() {
+                while (this.isTransmitting && this.characteristic) {
+                    try {
+                        const headingData = `H:${this.currentHeading.toFixed(1)}\n`;
+                        const encoder = new TextEncoder();
+                        const data = encoder.encode(headingData);
+                        
+                        await this.characteristic.writeValue(data);
+                        
+                        // Wait 100ms before next transmission
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        
+                    } catch (error) {
+                        console.error('Transmission error:', error);
+                        this.updateStatus('Transmission error: ' + error.message, 'error');
+                        this.stopCompass();
+                        break;
+                    }
+                }
+            }
+            
+            updateStatus(message, type = '') {
+                const statusElement = document.getElementById('status');
+                statusElement.textContent = message;
+                statusElement.className = 'status ' + type;
+            }
+        }
+        
+        // Check for Web Bluetooth support
+        if ('bluetooth' in navigator) {
+            const compass = new BluetoothCompass();
+        } else {
+            document.getElementById('status').textContent = 'Web Bluetooth not supported in this browser';
+            document.getElementById('status').className = 'status error';
+        }
+    </script>
+</body>
+</html>
